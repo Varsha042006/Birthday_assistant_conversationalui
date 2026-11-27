@@ -195,8 +195,8 @@ def execute(parsed: Dict[str, Any], df: pd.DataFrame, today: Optional[date] = No
         work = df.copy()
 
         # B. Filter by relationship or relationship group
-        if "relationship" in entities:
-            rel = entities["relationship"]
+        if entities.get("relationship"):
+            rel = str(entities["relationship"]).strip()
             is_rel = work["Relationship"].str.casefold() == rel.casefold()
             if "Relationship_Group" in work.columns:
                 is_rel = is_rel | (work["Relationship_Group"].str.casefold() == rel.casefold())

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CIUX Birthday Assistant — V5 (Voice Edition)</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="page">
+    <header class="academic-header">
+      <div>
+        <div class="eyebrow">GM University · School of Computer Science and Technology</div>
+        <h1>Birthday Assistant <span class="badge voice-badge">Voice Edition · V5</span></h1>
+        <p class="subtitle">UE24CS3540 — Conversational Interfaces and UX &middot; <strong>Ask by typing or speaking.</strong></p>
+      </div>
+      <div class="badge">{{ record_count }} synthetic people</div>
+    </header>
+
+    <section class="learning-strip">
+      <strong>Learning focus:</strong> Multimodal Voice Interaction &middot; Speech Recognition (ASR en-IN) &middot; Speech Synthesis (TTS) &middot; Grounded Backend.
+      <span>Web Speech API integration.</span>
+    </section>
+
+    <!-- Voice Control Bar -->
+    <section class="voice-bar" aria-label="Voice Controls">
+      <div class="voice-status-group">
+        <div id="voice-status" class="voice-status status-ready">
+          <span class="status-dot"></span>
+          <span id="voice-status-text">Ready</span>
+        </div>
+        <button type="button" id="stop-tts-btn" class="stop-btn" title="Stop speech playback" style="display: none;">
+          ⏹ Stop Speaking
+        </button>
+      </div>
+
+      <div class="voice-options-group">
+        <label class="tts-toggle" title="Toggle voice narration for assistant responses">
+          <input type="checkbox" id="tts-toggle" checked>
+          <span>Read responses aloud</span>
+        </label>
+        <button type="button" id="reset-btn" class="chip chip-reset">🔄 Reset Conversation</button>
+      </div>
+    </section>
+
+    <!-- Real-time recognized speech preview -->
+    <div id="transcript-bar" class="transcript-bar" style="display: none;" aria-live="polite">
+      <span class="transcript-label">Recognized Speech:</span>
+      <span id="transcript-text" class="transcript-content"></span>
+    </div>
+
+    <div class="layout">
+      <section class="chat-card">
+        <div id="chat" class="chat" aria-live="polite"></div>
+
+        <div class="chips" aria-label="Example and voice-test questions">
+          <button type="button" class="chip" data-q="Any birthdays tomorrow?">🎤 Any birthdays tomorrow?</button>
+          <button type="button" class="chip" data-q="Any nephew birthdays in September?">🎤 Nephews in Sep</button>
+          <button type="button" class="chip" data-q="What about October?">🎤 What about October?</button>
+          <button type="button" class="chip" data-q="When is Rahul Patil's birthday?">🎤 Rahul Patil's birthday</button>
+          <button type="button" class="chip" data-q="Where does Rahul Patil stay?">🎤 Where Rahul stays</button>
+        </div>
+
+        <form id="chat-form" class="composer">
+          <button type="button" id="mic-btn" class="mic-button" title="Speak question using microphone" aria-label="Speak Question">
+            <svg class="mic-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+              <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+              <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+            </svg>
+            <span class="mic-label">Speak</span>
+          </button>
+          <input id="question" autocomplete="off" placeholder="Type a question or click Speak…" aria-label="Question">
+          <button type="submit" class="send">Send</button>
+        </form>
+        <div class="hint">Click <strong>Speak</strong> to talk using your microphone (English en-IN). Spoken responses will read aloud automatically.</div>
+      </section>
+
+      <aside class="debug-card">
+        <h2>Dialogue &amp; Speech Trace</h2>
+        <p>Inspect active <strong>ASR Status</strong>, <strong>TTS State</strong>, <strong>Parser</strong>, and <strong>Dialogue Context</strong>.</p>
+        <pre id="trace">No query yet.</pre>
+        <div class="concept-box">
+          <strong>Voice Architecture:</strong>
+          <ul>
+            <li><strong>Speech Recognition (ASR):</strong> Web Speech API configured for Indian English (<code>en-IN</code>)</li>
+            <li><strong>Speech Synthesis (TTS):</strong> Reads answers using system Indian English voice</li>
+            <li><strong>Unified Backend:</strong> Both voice and typed inputs use <code>sendMsg()</code> and <code>/chat</code></li>
+            <li><strong>Factual Grounding:</strong> Answers are retrieved strictly from <code>people.xlsx</code></li>
+          </ul>
+        </div>
+      </aside>
+    </div>
+
+    <footer>Teaching project · Synthetic data only · Faculty: Dr. Shivanagowda G. M. &amp; Tejas</footer>
+  </main>
+  <script src="{{ url_for('static', filename='chat.js') }}"></script>
+</body>
+</html>

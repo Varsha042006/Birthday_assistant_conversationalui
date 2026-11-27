@@ -1,5 +1,10 @@
 import os
 from pathlib import Path
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except Exception:
+    pass
 import werkzeug
 if not hasattr(werkzeug, "__version__"):
     werkzeug.__version__ = "3.1.5"
@@ -13,6 +18,7 @@ from dialogue import (
     detect_ambiguity,
     enrich_with_context,
     extract_result_ids,
+    is_greeting,
     is_reset_command,
     resolve_clarification,
     update_state,
@@ -62,6 +68,19 @@ def chat():
                 "enriched_entities": {}
             },
             "state": {}
+        })
+
+    # 1b. Check for conversational greetings
+    if is_greeting(message):
+        return jsonify({
+            "answer": "Hello! How can I help you today? You can ask about upcoming birthdays, check birthdays by month or relationship, or ask where someone stays.",
+            "debug": {
+                "parser": "system",
+                "intent": "greeting",
+                "raw_entities": {},
+                "enriched_entities": {}
+            },
+            "state": dict(session.get("dialogue_state", {}))
         })
 
     state = dict(session.get("dialogue_state", {}))
@@ -122,7 +141,7 @@ def chat():
     # 5. Ambiguity detection
     is_ambiguous, candidates = detect_ambiguity(enriched, PEOPLE)
     if is_ambiguous:
-        rel = enriched["entities"]["relationship"]
+        rel = enriched["entities"].get("relationship") or enriched["entities"].get("person_name") or ""
         state["pending_clarification"] = {
             "intent": enriched["intent"],
             "relationship": rel,
@@ -177,13 +196,15 @@ def reset():
 
 @app.get("/api/health")
 def health():
-    llm_enabled = bool(os.environ.get("OPENAI_API_KEY"))
+    from llm_nlu import get_gemini_client
+    client = get_gemini_client()
     return jsonify(
         status="ok",
         records=len(PEOPLE),
         version="V4",
-        llm_enabled=llm_enabled,
-        model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        provider="Gemini",
+        llm_enabled=(client is not None),
+        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     )
 
 

@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
@@ -42,7 +42,8 @@ def test_checkpoint_q2_sibling_family_next_month(client):
             "place": None
         }
     }
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-dummy"}):
+    mock_client = MagicMock()
+    with patch("llm_nlu.get_gemini_client", return_value=mock_client):
         with patch("llm_nlu.call_llm", return_value=mock_llm_output):
             res = client.post("/api/chat", json={"message": "Are there people from my sibling family celebrating next month?"})
             assert res.status_code == 200
@@ -68,7 +69,8 @@ def test_checkpoint_q3_rahul_birthday_coming_soon(client):
             "place": None
         }
     }
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-dummy"}):
+    mock_client = MagicMock()
+    with patch("llm_nlu.get_gemini_client", return_value=mock_client):
         with patch("llm_nlu.call_llm", return_value=mock_llm_output):
             res = client.post("/api/chat", json={"message": "I was wondering whether Rahul has a birthday coming soon."})
             assert res.status_code == 200
@@ -94,7 +96,8 @@ def test_checkpoint_q4_complex_paraphrase_cousins_december(client):
             "place": None
         }
     }
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-dummy"}):
+    mock_client = MagicMock()
+    with patch("llm_nlu.get_gemini_client", return_value=mock_client):
         with patch("llm_nlu.call_llm", return_value=mock_llm_output):
             res = client.post("/api/chat", json={
                 "message": "Could you check if anyone among my cousins was born in the final month of the year?"

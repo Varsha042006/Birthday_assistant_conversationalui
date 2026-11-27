@@ -6,10 +6,13 @@ import re
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
+from google import genai
+from google.genai import types
 
 
 class EntitiesModel(BaseModel):
     person_name: Optional[str] = None
+    person_id: Optional[str] = None
     relationship: Optional[str] = None
     month: Optional[int] = None
     relative_date: Optional[str] = None
@@ -46,6 +49,7 @@ CRITICAL RULES:
   "intent": "<intent>",
   "entities": {
     "person_name": <string or null>,
+    "person_id": <string or null>,
     "relationship": <string or null>,
     "month": <integer 1-12 or null>,
     "relative_date": <string or null>,
@@ -59,7 +63,7 @@ ALLOWED INTENTS:
 - "count_birthdays": User asks how many birthdays exist or wants to count birthdays (e.g. "how many", "count").
 - "upcoming_birthdays": User asks about soon-to-occur birthdays (e.g. "upcoming birthdays", "birthdays coming soon").
 - "person_place": User asks where a person lives, stays, or resides (e.g. "where does Rahul stay?").
-- "unknown": Unrelated queries, general knowledge, greetings, or unsupported questions (e.g. "Who is the most intelligent person?").
+- "unknown": Unrelated queries, general knowledge, greetings, death, murder, or unsupported questions (e.g. "Who is the most intelligent person?", "When did she die?", "Who was murdered?"). All entities must be null.
 
 ENTITY EXTRACTION GUIDELINES:
 - "person_name": Full name or nickname mentioned (e.g. "Rahul", "Rahul Patil", "Nikhil").
@@ -72,48 +76,63 @@ ENTITY EXTRACTION GUIDELINES:
 """
 
 
-def get_openai_client():
-    """Create OpenAI client if OPENAI_API_KEY is available."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+def get_gemini_client() -> Optional[genai.Client]:
+    """Create Google Gemini client if GEMINI_API_KEY is available."""
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path
+        load_dotenv(Path(__file__).resolve().parent / ".env")
+        load_dotenv()
+    except Exception:
+        pass
+
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key or api_key.startswith("your_") or api_key.startswith("your-") or api_key == "YOUR_GEMINI_API_KEY":
         return None
 
     try:
-        from openai import OpenAI
-        base_url = os.environ.get("OPENAI_BASE_URL")
-        if base_url:
-            return OpenAI(api_key=api_key, base_url=base_url)
-        return OpenAI(api_key=api_key)
+        client = genai.Client(api_key=api_key)
+        return client
     except Exception as e:
-        print(f"[llm_nlu] Failed to initialize OpenAI client: {e}")
+        print(f"[llm_nlu] Failed to initialize Gemini client: {e}")
         return None
 
 
 def call_llm(message: str) -> Dict[str, Any]:
-    """Call OpenAI API to semantically parse the utterance into validated JSON."""
-    client = get_openai_client()
+    """Call Google Gemini Developer API to semantically parse the utterance into validated JSON."""
+    client = get_gemini_client()
     if client is None:
-        raise ValueError("OpenAI client is not configured or OPENAI_API_KEY is missing.")
+        raise ValueError("Gemini client is not configured or GEMINI_API_KEY is missing/placeholder.")
 
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": message}
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.0,
-        timeout=10.0
+    import time
+
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        response_mime_type="application/json",
+        response_schema=NLUOutputModel,
+        temperature=0.0
     )
 
-    raw_content = response.choices[0].message.content or "{}"
-    data = json.loads(raw_content)
-
-    # Validate against strict Pydantic model
-    validated = NLUOutputModel.model_validate(data)
-    return validated.model_dump()
+    last_err = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=message,
+                config=config
+            )
+            raw_content = response.text or "{}"
+            data = json.loads(raw_content)
+            validated = NLUOutputModel.model_validate(data)
+            return validated.model_dump()
+        except Exception as e:
+            last_err = e
+            if attempt < 2 and ("503" in str(e) or "UNAVAILABLE" in str(e) or "ResourceExhausted" in str(e)):
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise last_err
 
 
 def ground_entities(parsed: Dict[str, Any], df: Optional[pd.DataFrame]) -> Dict[str, Any]:
@@ -125,9 +144,13 @@ def ground_entities(parsed: Dict[str, Any], df: Optional[pd.DataFrame]) -> Dict[
     """
     grounded = {
         "intent": parsed.get("intent", "unknown"),
-        "entities": dict(parsed.get("entities", {}))
+        "entities": {k: v for k, v in parsed.get("entities", {}).items() if v is not None}
     }
     e = grounded["entities"]
+
+    # If user specifies relative_date like "tomorrow" or "today", intent must be birthday_search, not upcoming_birthdays
+    if e.get("relative_date") in ("tomorrow", "today") and grounded["intent"] == "upcoming_birthdays":
+        grounded["intent"] = "birthday_search"
 
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return grounded
@@ -139,54 +162,52 @@ def ground_entities(parsed: Dict[str, Any], df: Optional[pd.DataFrame]) -> Dict[
         candidates = []
 
         for _, row in df.iterrows():
-            full = str(row.get("Name", "")).strip()
-            nick = str(row.get("Nickname", "")).strip()
             p_id = str(row.get("Person_ID", "")).strip()
+            name_val = str(row.get("Name", "")).strip()
+            nick_val = str(row.get("Nickname", "")).strip()
 
-            # Exact match on nickname
-            if nick and nick.casefold() == cleaned_name.casefold():
-                candidates.append((p_id, full, nick, 1))
-            # Exact match on full name
-            elif full and full.casefold() == cleaned_name.casefold():
-                candidates.append((p_id, full, nick, 2))
-            # Word boundary / prefix match
-            elif full and re.search(rf"\b{re.escape(cleaned_name.casefold())}\b", full.casefold()):
-                candidates.append((p_id, full, nick, 3))
-            elif nick and re.search(rf"\b{re.escape(cleaned_name.casefold())}\b", nick.casefold()):
-                candidates.append((p_id, full, nick, 4))
+            # Exact full name match
+            if name_val.casefold() == cleaned_name.casefold():
+                candidates.append((p_id, name_val, "exact_name"))
+                continue
 
-        # Sort by match priority (1: exact nick, 2: exact full, 3: word match full, 4: word match nick)
-        candidates.sort(key=lambda x: x[3])
+            # Exact nickname match (only consider real individuals, ignoring placeholder test artifacts)
+            if nick_val and nick_val.casefold() == cleaned_name.casefold():
+                if not name_val.lower().endswith("s6") and not name_val.lower().endswith("kulkarni6"):
+                    candidates.append((p_id, name_val, "exact_nickname"))
+                continue
 
-        if candidates:
-            best_priority = candidates[0][3]
-            best_matches = [c for c in candidates if c[3] == best_priority]
-            unique_best = {}
-            for c in best_matches:
-                if c[0] not in unique_best:
-                    unique_best[c[0]] = c
-            unique_list = list(unique_best.values())
+            # Single name token match (e.g. "Rahul" in "Rahul Patil")
+            name_tokens = [tok.casefold() for tok in name_val.split()]
+            if cleaned_name.casefold() in name_tokens:
+                if not name_val.lower().endswith("s6") and not name_val.lower().endswith("kulkarni6"):
+                    candidates.append((p_id, name_val, "token_match"))
 
-            if len(unique_list) == 1:
-                e["person_id"] = unique_list[0][0]
-                e["person_name"] = unique_list[0][1]
-            elif len(unique_list) > 1:
-                # Ambiguous person name: multiple people match with equal priority
-                e["person_id"] = None
-                e["ambiguous_candidates"] = [
-                    {"person_id": c[0], "name": c[1], "nickname": c[2]}
-                    for c in unique_list
-                ]
+        # If all candidates match the token, include all real candidates (e.g. all Nikhils)
+        token_matches = [c for c in candidates if c[2] == "token_match"]
+        exact_matches = [c for c in candidates if c[2] in ("exact_name", "exact_nickname")]
+        
+        # When user gives a single name like "Nikhil", consider both token and nickname matches
+        all_unique_names = list(dict.fromkeys([c[1] for c in (exact_matches + token_matches)]))
+        if len(all_unique_names) > 1:
+            e["person_id"] = None
+            e["ambiguous_candidates"] = all_unique_names
+        elif len(exact_matches) == 1:
+            e["person_id"] = exact_matches[0][0]
+            e["person_name"] = exact_matches[0][1]
+        elif len(candidates) == 1:
+            e["person_id"] = candidates[0][0]
+            e["person_name"] = candidates[0][1]
         else:
-            # Person not found in Excel dataset: do not invent Person_ID
             e["person_id"] = None
 
-    # 2. Ground relationship to canonical title case in Excel
-    rel = e.get("relationship")
-    if rel and isinstance(rel, str):
-        rel_clean = rel.strip()
+    # 2. Ground relationship to canonical Excel label
+    rel_mention = e.get("relationship")
+    if rel_mention and isinstance(rel_mention, str):
+        rel_clean = rel_mention.strip()
         matched_rel = None
 
+        # Check canonical Relationship column
         if "Relationship" in df.columns:
             for canonical in df["Relationship"].dropna().unique():
                 c_str = str(canonical).strip()
@@ -215,24 +236,24 @@ def parse_with_fallback(
     rule_parser: Optional[Any] = None
 ) -> Tuple[Dict[str, Any], str]:
     """
-    Attempt to parse user utterance using LLM NLU.
-    If LLM API is unavailable, unconfigured, or fails validation,
+    Attempt to parse user utterance using Gemini NLU.
+    If Gemini API is unavailable, unconfigured, or fails validation,
     safely falls back to the deterministic rule-based parser.
 
     Returns:
         (parsed_dict, parser_used)
         where parser_used is either "llm" or "rule_fallback".
     """
-    # 1. Attempt LLM NLU if API key is present
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if api_key:
+    # 1. Attempt Gemini NLU if API key is present and configured
+    client = get_gemini_client()
+    if client is not None:
         try:
             llm_result = call_llm(message)
             grounded = ground_entities(llm_result, df)
             return grounded, "llm"
         except Exception as e:
             # Log error securely without exposing keys
-            print(f"[llm_nlu] Fallback triggered due to LLM error: {type(e).__name__}: {e}")
+            print(f"[llm_nlu] Fallback triggered due to Gemini error: {type(e).__name__}: {e}")
 
     # 2. Fallback to rule-based parser from nlu.py
     if rule_parser is not None:

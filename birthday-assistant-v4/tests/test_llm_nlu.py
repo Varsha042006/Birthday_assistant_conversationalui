@@ -157,18 +157,20 @@ def test_grounding_relationship_and_group(sample_df):
 
 
 def test_parse_with_fallback_when_no_api_key(sample_df):
-    with patch.dict(os.environ, {}, clear=True):
-        res, parser_used = parse_with_fallback("Any nephew birthdays in September?", sample_df)
-        assert parser_used == "rule_fallback"
-        assert res["intent"] == "birthday_search"
-        assert res["entities"]["relationship"] == "Nephew"
-        assert res["entities"]["month"] == 9
+    with patch.dict(os.environ, {"GEMINI_API_KEY": ""}, clear=True):
+        with patch("llm_nlu.get_gemini_client", return_value=None):
+            res, parser_used = parse_with_fallback("Any nephew birthdays in September?", sample_df)
+            assert parser_used == "rule_fallback"
+            assert res["intent"] == "birthday_search"
+            assert res["entities"]["relationship"] == "Nephew"
+            assert res["entities"]["month"] == 9
 
 
 def test_parse_with_fallback_on_api_error(sample_df):
     # With a mock client that raises an exception, should fallback cleanly
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-dummy-test-key"}):
-        with patch("llm_nlu.call_llm", side_effect=Exception("API connection timeout")):
+    mock_client = MagicMock()
+    with patch("llm_nlu.get_gemini_client", return_value=mock_client):
+        with patch("llm_nlu.call_llm", side_effect=Exception("Gemini API connection timeout")):
             res, parser_used = parse_with_fallback("When is Rahul's birthday?", sample_df)
             assert parser_used == "rule_fallback"
             assert res["intent"] == "birthday_search"
@@ -180,6 +182,7 @@ def test_parse_with_fallback_success_mock(sample_df):
         "intent": "birthday_search",
         "entities": {
             "person_name": "Rahul Patil",
+            "person_id": None,
             "relationship": None,
             "month": None,
             "relative_date": None,
@@ -187,7 +190,8 @@ def test_parse_with_fallback_success_mock(sample_df):
             "place": None
         }
     }
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-dummy-test-key"}):
+    mock_client = MagicMock()
+    with patch("llm_nlu.get_gemini_client", return_value=mock_client):
         with patch("llm_nlu.call_llm", return_value=mock_llm_output):
             res, parser_used = parse_with_fallback("I wonder when Rahul Patil was born", sample_df)
             assert parser_used == "llm"

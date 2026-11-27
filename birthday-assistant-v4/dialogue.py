@@ -5,6 +5,17 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 
+def is_greeting(message: str) -> bool:
+    """Check if the user utterance is a standard conversational greeting."""
+    cleaned = (message or "").strip().lower()
+    cleaned = re.sub(r"[^\w\s]", "", cleaned).strip()
+    greeting_patterns = [
+        r"^(hi|hello|hey|heya|howdy|namaste|greetings)(\s+there)?$",
+        r"^good\s+(morning|afternoon|evening|day)$"
+    ]
+    return any(re.match(pat, cleaned) for pat in greeting_patterns)
+
+
 def is_reset_command(message: str) -> bool:
     """Check if the user requested a conversation reset."""
     cleaned = (message or "").strip().lower()
@@ -18,7 +29,11 @@ def is_reset_command(message: str) -> bool:
     return any(re.match(pat, cleaned) for pat in reset_patterns)
 
 
-def enrich_with_context(parsed: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+def enrich_with_context(
+    parsed: Dict[str, Any],
+    state: Dict[str, Any],
+    raw_message: str = ""
+) -> Dict[str, Any]:
     """
     Receive the parsed NLU result and current dialogue state.
     Carries forward relevant context (month, relationship) when the new turn
@@ -27,14 +42,19 @@ def enrich_with_context(parsed: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
     """
     enriched = {
         "intent": parsed.get("intent", "unknown"),
-        "entities": dict(parsed.get("entities", {}))
+        "entities": {k: v for k, v in parsed.get("entities", {}).items() if v is not None}
     }
     e = enriched["entities"]
     intent = enriched["intent"]
 
-    # If the user utterance was parsed as unknown but contains entities
-    # like a month or relationship, it is likely a follow-up turn.
-    if intent == "unknown":
+    # If the user utterance is an elliptical follow-up (e.g. 'What about October?', 'How about nieces?', 'And next month?')
+    # or was parsed as unknown, inherit the previous active intent (e.g. 'count_birthdays' or 'birthday_search')
+    is_elliptical = bool(re.search(r"^(what|how)\s+about\b", (raw_message or "").strip().lower()) or
+                         re.search(r"^(and|also)\b", (raw_message or "").strip().lower()))
+    if is_elliptical and state.get("last_intent"):
+        enriched["intent"] = state["last_intent"]
+        intent = enriched["intent"]
+    elif intent == "unknown":
         if ("month" in e or "relationship" in e or "relative_month" in e) and (
             state.get("relationship") or state.get("month") or state.get("last_intent")
         ):
@@ -51,7 +71,7 @@ def enrich_with_context(parsed: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
 
     # Carry forward month and relationship if not present in new turn
     for key in ("month", "relationship"):
-        if key not in e and state.get(key) is not None:
+        if (key not in e or e[key] is None) and state.get(key) is not None:
             # If relative_month is explicitly specified in new turn, do not carry forward calendar month
             if key == "month" and "relative_month" in e:
                 continue
@@ -62,12 +82,33 @@ def enrich_with_context(parsed: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
 
 def detect_ambiguity(parsed: Dict[str, Any], df: pd.DataFrame) -> Tuple[bool, List[Dict[str, str]]]:
     """
-    Check if a birthday query asks for a person by relationship but matches multiple candidates.
-    Example: 'When is my nephew's birthday?'
+    Check if a query is ambiguous because:
+    1. It asks for a person by relationship matching multiple candidates (e.g. 'When is my nephew's birthday?').
+    2. Or it asks for a person by name/nickname that matches multiple people (e.g. 'When was Nikhil birthday?').
     Returns (is_ambiguous, candidates_list).
     """
     intent = parsed.get("intent")
     entities = parsed.get("entities", {})
+
+    if df is None or df.empty:
+        return False, []
+
+    # Case A: Ambiguous person name detected during NLU grounding
+    ambiguous_names = entities.get("ambiguous_candidates")
+    if ambiguous_names and isinstance(ambiguous_names, list) and len(ambiguous_names) > 1:
+        candidates = []
+        for name in ambiguous_names:
+            matches = df[df["Name"].str.casefold() == str(name).strip().casefold()]
+            if not matches.empty:
+                r = matches.iloc[0]
+                candidates.append({
+                    "person_id": str(r["Person_ID"]),
+                    "name": str(r["Name"]),
+                    "nickname": str(r["Nickname"]).strip() if pd.notna(r["Nickname"]) else ""
+                })
+            else:
+                candidates.append({"person_id": "", "name": str(name), "nickname": ""})
+        return True, candidates
 
     # Ambiguity check applies to birthday_search with relationship
     # and no specific person name, person_id, month, or date filter.
@@ -81,7 +122,7 @@ def detect_ambiguity(parsed: Dict[str, Any], df: pd.DataFrame) -> Tuple[bool, Li
         return False, []
 
     rel = entities.get("relationship")
-    if not rel or df is None or df.empty:
+    if not rel:
         return False, []
 
     matches = df[df["Relationship"].str.casefold() == rel.casefold()]
@@ -106,14 +147,30 @@ def detect_ambiguity(parsed: Dict[str, Any], df: pd.DataFrame) -> Tuple[bool, Li
     return False, []
 
 
-def create_clarification_prompt(relationship: str, candidates: List[Dict[str, str]]) -> str:
+def create_clarification_prompt(relationship_or_name: str, candidates: List[Dict[str, str]]) -> str:
     """Generate a polite clarification prompt listing matching candidates."""
     names = [c["name"] for c in candidates]
     names_str = ", ".join(names)
+    count = len(candidates)
+    if relationship_or_name:
+        # Check if relationship_or_name is a known relationship
+        is_rel = relationship_or_name.lower() in [
+            "nephew", "niece", "sister", "brother", "friend", "cousin", "wife", "uncle", "aunt",
+            "father", "mother", "son", "daughter", "colleague", "student", "brother-in-law"
+        ]
+        if is_rel:
+            return (
+                f"I found multiple people with the relationship {relationship_or_name}:\n"
+                f"{names_str}\n"
+                f"Which person's birthday would you like to know?"
+            )
+        return (
+            f"There are {count} people named {relationship_or_name}: {names_str}. "
+            f"Whom do you want?"
+        )
     return (
-        f"I found multiple people with the relationship {relationship}:\n"
-        f"{names_str}\n"
-        f"Which person's birthday would you like to know?"
+        f"There are {count} matching people: {names_str}. "
+        f"Whom do you want?"
     )
 
 
